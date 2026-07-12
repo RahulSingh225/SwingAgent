@@ -1,0 +1,6 @@
+packages:
+  - 'packages/*'
+  - 'apps/web'
+# apps/mobile (AlertsReader, Phase 6) stays npm-managed and outside the
+# pnpm workspace — Metro + pnpm symlinked node_modules don't mix well.
+# It consumes @market-os/intel via a file: dependency instead.
