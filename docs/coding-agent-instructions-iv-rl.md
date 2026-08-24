@@ -1,256 +1,211 @@
-# Coding Agent Instructions — IV Surface + RL Entry/Exit Discovery
+# Coding Agent Instructions — IV Surface, Rule Engine & Regime Analysis
 
 **Repo:** SwingAgent  
-**Audience:** Coding agent (Claude / Cursor / local agent)  
-**Owner goal:** Discover and formalize the entry & exit conditions that drove Arpan Sengupta’s profitable option buying, then encode them as both a rule-based filter and learnable RL policies.
+**Audience:** Coding agent  
+**Status:** Rewritten 2026-08-25 after contract-day analysis and agent review.
 
 ---
 
-## 0. Context (read first)
+## 0. What changed and why
 
-We already have:
+An earlier version of this document treated “formalize Arpan’s profitable *buying* of cheap options” as the goal and prescribed an RL stack (entry/exit agents, imitation rewards, premium ceiling as a hard constraint).
 
-- Day-wise equity bhavcopy + adjusted prices
-- India VIX (or ability to backfill)
-- Event outcomes ledger, gap-fade / wave-fade research
-- Arpan’s verified P&L (Excel in `resources/`) + trade-level FO/Equity/Commodity data
-- Prior hypothesis work: VIX + Expansion Day filter, multi-day hold preference, premium ceiling, size discipline
+That premise is now contested:
 
-**Core insight from research so far:**
-Quiet days (low range / low gap) = pure theta bleed for long options.  
-Expansion days + elevated/rising VIX = the environment where cheap OTM directional buys have edge.
+- Large-sample contract-day tests on cheap NIFTY options showed deeply negative expected returns over 1–5 sessions.
+- Book structure (many Buy Avg = 0 rows, high OTM-finish rate) is more consistent with *selling* premium than with systematically buying cheap long convexity.
+- There are **no clean entry-day labels** (one row ≈ one symbol lifetime). Bhavcopy can only produce *candidate* sessions.
+- Eligible days under a loose OR-gate are ~44% of history — not a real filter. An AND-gate is materially stronger in partial tests.
+- ~700–1,600 daily episodes on a single realized path is a poor fit for RL; sequential credit assignment helps most on *exits*, where data is weakest.
 
-This document tells you **exactly what to build**, in priority order, with the decision tree and constraints that must be respected.
+**Therefore:**
+
+| Item | Status |
+|------|--------|
+| **Priority 1 — IV surface** | **Build. Unconditionally.** |
+| **Rule engine (decision tree)** | **Build as a hypothesis under test**, not as a hard constraint. Prefer AND; test VIX direction. |
+| **Phase A — regime on Arpan candidates** | **Build.** Resolve fills → candidate sessions; measure regimes with evidence. |
+| **RL entry/exit agents** | **Parked.** Do not implement until Phase A and IV surface exist and the buying premise is resolved. |
+| **Premium ceiling as “prefer cheap”** | **Retired as a hard rule.** Re-evaluate only after DTE-controlled analysis. |
+
+If a learned model is wanted later, prefer **gradient-boosted trees on a supervised target** over RL for this sample size and tabular state.
 
 ---
 
-## 1. Priority 1 — IV Surface Construction
+## 1. Priority 1 — IV Surface (do this first)
 
 ### Goal
-Build a usable Implied Volatility surface (or at least a reliable ATM / near-OTM IV time series) so every later model can condition on *how expensive options actually were* on the day Arpan entered.
+Produce a usable implied-volatility surface (or at least reliable daily IV metrics) so every later analysis can condition on *how expensive options actually were*.
+
+This does **not** depend on the disputed buying premise. It is the missing input for the rest of the project.
 
 ### Required outputs
-1. **Daily IV metrics table** (one row per trading day, per underlier of interest — start with NIFTY, BANKNIFTY, then liquid single stocks Arpan traded):
-   - `date`
-   - `underlier`
-   - `spot`
-   - `atm_iv` (or nearest strike IV)
-   - `iv_rank_20d`, `iv_rank_60d`
-   - `iv_percentile`
-   - `front_expiry`, `next_expiry`
-   - `term_structure_slope` (front – next, or 7d–30d equivalent)
-   - `skew` (25Δ put IV – 25Δ call IV, or closest available)
-   - `vix` (India VIX close) and `vix_change_1d`, `vix_ma_5`, `vix_ma_20`
 
-2. **Option-level join table** that can be matched to Arpan’s trades:
-   - For each of Arpan’s option trades, resolve: strike, expiry, side (CE/PE), buy avg, sell avg, days held, premium paid, and the IV environment *on entry day*.
+1. **Daily IV metrics table** (start with NIFTY, then BANKNIFTY / liquid names as data allows):
 
-### Data sources & implementation notes
-- Prefer FO bhavcopy / NSE option data already partially handled by `scripts/fetch-fo-bhavcopy.py` and related scripts.
-- If full chain history is incomplete, bootstrap with:
-  - India VIX as market-wide IV proxy
-  - Any available strike-level closes you can reconstruct from existing FO files
-  - Black-Scholes inversion only where you have reliable price + time-to-expiry + rate assumptions (document assumptions clearly)
-- Store results in Postgres (new tables, e.g. `iv_surface_daily`, `trade_iv_context`) so RL environments and research scripts can query them.
-- Script location suggestion: `apps/web/scripts/build-iv-surface.ts` (or `.py` if you stay in the FO pipeline style).
+   | Column | Meaning |
+   |--------|--------|
+   | `date`, `underlier` | |
+   | `spot` | Underlying close |
+   | `atm_iv` | ATM or nearest-strike IV |
+   | `iv_rank_20d`, `iv_rank_60d` | |
+   | `iv_percentile` | |
+   | `front_expiry`, `next_expiry` | |
+   | `term_structure_slope` | Front − next (or 7d–30d equiv.) |
+   | `skew` | e.g. 25Δ put − 25Δ call, or closest available |
+   | `vix`, `vix_change_1d`, `vix_ma_5`, `vix_ma_20` | India VIX context |
+
+2. **Optional but valuable:** option-level context joinable to any future trade reconstruction (strike, expiry, IV on that day).
+
+### Implementation notes
+
+- Source: FO bhavcopy / per-strike closes already partially handled by `scripts/fetch-fo-bhavcopy.py` and related pipelines (~millions of rows with close + underlying → BS inversion is straightforward).
+- Document rate, dividend, and day-count assumptions used in inversion.
+- Store in Postgres (`iv_surface_daily`, etc.) so research scripts and the dashboard can query them.
+- Suggested location: `apps/web/scripts/build-iv-surface.ts` or `.py` next to the FO pipeline.
 
 ### Acceptance criteria
-- [ ] Daily ATM (or proxy) IV series for NIFTY covering the full Arpan trade window
-- [ ] Every Arpan FO option trade can be joined to entry-day IV metrics
-- [ ] Basic diagnostics printed: coverage %, missing days, correlation of ATM IV vs India VIX
+
+- [ ] Daily ATM (or proxy) IV series for NIFTY covering the analysis window
+- [ ] Coverage %, missing days, and correlation of ATM IV vs India VIX printed in a short report
+- [ ] Tables queryable from the same DB the rest of the project uses
 
 ---
 
-## 2. Priority 2 — Reinforcement Learning Agents for Entry & Exit
+## 2. Rule engine — hypothesis under test (not a constraint)
 
-### Goal
-Use our market dataset + Arpan’s actual trades to *discover* (or at least approximate) the conditions under which he entered and exited, and to test whether those conditions generalize.
+Implement the expansion × VIX logic as a **deterministic, testable filter**. Do not hard-code it inside an RL mask yet.
 
-We are **not** trying to beat the market with black-box RL on day one.  
-We are trying to answer:
-
-> “Given the state of the world (OHLC, VIX, IV, expansion, OI if available), what policy would have reproduced Arpan’s profitable behavior, and can we improve the exit side?”
-
-### Agents to build
-
-| Agent | Responsibility | Notes |
-|-------|----------------|-------|
-| **Entry Agent** | Decide: enter / skip / small-size on a given day | Must respect expansion + VIX gate |
-| **Exit Agent** | Decide: hold / exit / partial | Multi-day holds allowed; no forced EOD exit |
-| **Sizing Agent** (optional v1.5) | Position size relative to capital / risk | Penalize size escalation after losses |
-| **Full Policy Agent** | Joint entry + exit | Train only after separate agents are stable |
-
-### Environment design (Gymnasium-style)
-
-**State (minimum viable):**
-- Nifty (or underlier) features: open, high, low, close, range %, gap %, prior 1d/3d/5d return, ATR or realized vol
-- India VIX: level, 1d change, vs 5d MA, vs 20d MA
-- IV surface features (from Priority 1): ATM IV, IV rank, skew, term slope
-- Calendar: days to weekly/monthly expiry, day-of-week
-- Portfolio state: currently in a position? days held, unrealized P&L, entry premium
-- (Later) OI / volume expansion if data allows
-
-**Actions:**
-- Entry agent: `{skip, enter_long_call, enter_long_put, enter_small}`  
-  (or continuous size in a later version)
-- Exit agent: `{hold, exit_full, exit_half}` while in position
-
-**Reward ideas (test several):**
-1. Realized P&L of the trade (primary)
-2. Risk-adjusted: P&L − λ × max drawdown of trade
-3. Behavioral: bonus for matching Arpan’s actual entry days / direction (imitation + RL hybrid)
-4. Explicit penalty for entering on quiet days (range < 0.8% and gap < 0.6%)
-5. Explicit penalty for buying expensive premium (above a ceiling derived from Arpan’s distribution)
-
-**Episode design:**
-- One trading day = one step for entry decisions
-- Once in a trade, subsequent days are exit-agent steps until exit or forced max-hold (e.g. 10 sessions)
-- Use train / test temporal split (e.g. train on earlier years, test on 2025–2026) — never random shuffle of days
-
-### Libraries & location
-- Prefer Python for RL: `gymnasium`, `stable-baselines3` or `cleanrl`, `pandas`, `numpy`
-- Put code under something like:
-  ```
-  apps/web/scripts/rl/
-    env.py
-    features.py
-    train_entry.py
-    train_exit.py
-    evaluate.py
-    configs/
-  ```
-- Or a new package `packages/rl/` if it grows.
-
-### Acceptance criteria
-- [ ] Environment can replay the historical day sequence with correct features
-- [ ] Entry agent can be trained and produces a policy whose “enter” days can be compared to Arpan’s actual entry days
-- [ ] Exit agent can be trained on the subset of days where a position was open
-- [ ] Clear report: win rate, average hold days, average P&L, max drawdown vs Arpan baseline and vs the pure decision-tree rule set
-
----
-
-## 3. Baseline Decision Tree (must be implemented first as a rule engine)
-
-Before any neural net, implement this **exactly** as a deterministic filter. It becomes both a baseline and a hard constraint / feature inside the RL environment.
+### Baseline tree (revise from earlier OR-heavy version)
 
 ```
 Is Nifty showing expansion today?
-   (Range ≥ 0.8%  OR  Gap ≥ 0.6%)
+   Prefer AND for a real filter:
+   (Range ≥ 0.8%  AND  |Gap| ≥ 0.6%)   # test; also report OR for comparison
         │
-       Yes ──► Is India VIX rising  OR  above its recent average?
+       Yes ──► VIX condition (TEST both directions; do not assume “rising is good”)
                     │
-                   Yes ──► Eligible for cheap OTM option entry
+                   A: VIX rising OR above recent MA
+                   B: VIX falling OR below recent MA
                     │
-                   No  ──► Smaller size or skip
+                   Report expansion × VIX cells separately
         │
-       No  ──► Stand down (quiet day = Theta risk)
+       No  ──► Stand down (quiet day)
 ```
 
+### Why AND and why test VIX direction
+
+- Partial results: OR eligibility ~44% of days (weak); AND much tighter and showed stronger absolute-move multiples in tests.
+- Gap-expansion days have been observed with VIX *falling* over subsequent sessions — so “VIX rising” may be the wrong long-vega prior. Measure both.
+
 ### Implementation requirements
-- `Range %` = (High − Low) / Previous Close × 100  (or / Open — document which and stay consistent)
-- `Gap %` = (Open − Previous Close) / Previous Close × 100  (absolute value for “gap size”)
-- “VIX rising” = VIX close > VIX close 1 session ago  **or** VIX close > 5-day MA (test both; report both)
-- “Cheap OTM” = premium below a ceiling derived from Arpan’s actual entry premiums (compute the distribution; start with a conservative percentile, e.g. ≤ 75th or a hard ₹ cap if that matches his behavior)
-- Output of the rule engine on every historical day: `eligible | small | skip` + reason code
 
-This rule engine must be callable from both research scripts and the RL environment (as a mask or as a feature).
+- `Range %` and `Gap %` definitions documented and fixed in one config object.
+- Output for every historical day: `eligible_and` / `eligible_or` / `skip` + reason codes + VIX bucket.
+- Script must print contingency tables: expansion × VIX direction × forward realized move (1d / 5d) so the hypothesis is falsifiable.
 
----
+### Acceptance criteria
 
-## 4. Additional Rules & Constraints (from prior research — do not ignore)
-
-Encode these as soft or hard constraints:
-
-1. **Premium ceiling** — Prefer the cheap end of the option chain. Expensive premium was rarely Arpan’s edge.
-2. **Multi-day hold is allowed and preferred** — Do not force same-day exit. Exit agent owns the hold decision.
-3. **Quiet day = stand down** — Already in the tree. Theta is the enemy on low-range days.
-4. **Size discipline** — Penalize increasing size after a losing trade / losing day. Arpan’s edge includes not digging a hole with size.
-5. **Directional leg** — Entry should eventually condition on a simple directional signal (prior day return, short-term momentum, or OI change if available). Pure non-directional long premium is weaker.
-6. **Liquidity** — Only consider underliers / strikes that were realistically tradeable (use turnover / volume floors consistent with earlier gap-fade work).
-7. **No look-ahead** — All features on day T must be knowable before or at the open of day T (or at the decision time you define). Document the decision timestamp assumption clearly.
+- [ ] Daily eligibility table for the full history
+- [ ] Side-by-side OR vs AND counts and forward-move multiples
+- [ ] VIX-rising vs VIX-falling cells reported separately (no assumed sign)
 
 ---
 
-## 5. Suggested Implementation Phases
+## 3. Phase A — Arpan regime analysis (done properly)
 
-### Phase A — Foundations (do first)
-1. Confirm / backfill India VIX daily series into the DB.
-2. Implement the **decision tree rule engine** and run it over the full history → produce a daily eligibility table.
-3. Join Arpan’s option trades to market state + eligibility flags. Answer: “On what fraction of his actual entry days was the tree green?”
+### Goal
+Answer with evidence: **in which market regimes did Arpan’s fills actually sit?**
 
-### Phase B — IV Surface
-1. Build daily IV metrics (Priority 1).
-2. Attach IV context to every Arpan trade.
-3. Simple analysis: did he enter more often when IV rank was low / rising / high?
+### Method
 
-### Phase C — RL Environment + Exit Agent
-1. Build Gymnasium env with the state features above.
-2. Train **Exit Agent** first (cleaner credit assignment: once in a trade, only exit matters).
-3. Evaluate hold-time distribution vs Arpan.
+1. From Arpan FO rows, take buy/sell averages and symbols.
+2. Use bhavcopy (and FO chain data where available) to find **candidate sessions** where a fill at that price is feasible (e.g. session Low ≤ price ≤ High for that contract).
+3. Expect a small set of candidate days per trade (often 2–3), not a unique timestamp.
+4. On those candidate days, measure:
+   - Expansion (range / gap)
+   - India VIX level and change
+   - IV rank / ATM IV (once Priority 1 exists)
+   - DTE of the contract
+   - Directional context (prior returns, etc.)
+5. Aggregate: distribution of regimes on candidate sets vs base-rate of all days.
 
-### Phase D — Entry Agent + Hybrid
-1. Train Entry Agent, optionally with imitation reward toward Arpan’s entry days.
-2. Combine with decision-tree mask (agent may only act when tree says eligible/small).
-3. Full policy optional.
+### What this is *not*
 
-### Phase E — Reporting
-- Side-by-side: Rule-only vs RL-entry vs RL-exit vs Arpan actual
-- Out-of-sample stability
-- Failure modes (which regimes destroy the edge)
+- Not supervised “entry day” labels for imitation learning.
+- Not proof he was long or short — only evidence of *when* those prices were tradeable.
+
+### Acceptance criteria
+
+- [ ] Candidate-session resolution pipeline for a meaningful fraction of Arpan FO rows
+- [ ] Regime stats (expansion × VIX × IV) on candidates vs unconditional base rates
+- [ ] Short findings note under `docs/` (e.g. `docs/arpan-regime-candidates.md`)
 
 ---
 
-## 6. Data Assets Already in Repo (use them)
+## 4. Explicitly parked — RL stack
+
+Do **not** implement in this pass:
+
+- Entry / Exit / Sizing / Full-policy RL agents
+- Gymnasium env driven by imitation of Arpan entry days
+- Reward terms that require “Arpan entered same side that day” as a hard label
+- Premium ceiling encoded as “prefer the cheap end” without DTE controls
+
+**If** Phase A + IV surface later support a clear sequential decision problem (especially **exits**) and sample size improves, revisit with:
+
+- Supervised GBT first (tabular, cross-validatable), or
+- A small Exit-only RL experiment with honest train/test temporal splits and pure-P&L baselines.
+
+Until then, RL is out of scope.
+
+Related doc `docs/rl-reward-shaping.md` remains a **reference design only** — not an implementation order.
+
+---
+
+## 5. Suggested build order
+
+| Step | Work | Depends on |
+|------|------|------------|
+| A | Confirm / backfill India VIX daily into DB | — |
+| B | **IV surface** (Priority 1) | FO bhavcopy / chain closes |
+| C | **Rule engine** (AND + OR, both VIX directions, forward-move tables) | OHLC + VIX |
+| D | **Phase A** candidate sessions + regime stats | Arpan FO + bhavcopy + (B) for IV |
+| E | Findings markdown | C + D |
+| F | Only then: optional GBT or limited Exit experiment | Clear target from E |
+
+---
+
+## 6. Data assets (unchanged)
 
 | Asset | Location / notes |
 |-------|------------------|
-| Arpan verified P&L Excel | `resources/Arpan Sengupta (Blu_Dragon) – Verified P&L Trades.xlsx` |
-| Arpan analysis doc | `docs/arpan-trade-analysis.md` |
-| Gap-fade findings | `docs/gap-fade-findings.md` |
-| Wave-fade findings | `docs/wave-fade-findings.md` |
-| Outcome ledger | `docs/outcome-ledger.md`, `scripts/build-event-outcomes.ts` |
-| Bhavcopy / prices | Ingestion + `eod_prices` / adjusted price scripts |
+| Arpan verified P&L Excel | `resources/` |
+| Arpan analysis | `docs/arpan-trade-analysis.md` |
+| Gap-fade / wave-fade / ledger | `docs/*-findings.md`, `docs/outcome-ledger.md` |
 | FO bhavcopy fetcher | `scripts/fetch-fo-bhavcopy.py` |
-| DB schema | `apps/web/lib/db/schema.ts` |
-
-Extend schema rather than creating parallel CSV silos when possible.
-
----
-
-## 7. What “Done” Looks Like
-
-You can stop and report when you can answer, with evidence:
-
-1. On which market regimes (expansion × VIX × IV rank) did Arpan actually enter?
-2. Does the simple decision tree already capture a large fraction of his profitable entries?
-3. Can an Exit RL agent improve average hold / exit timing over a fixed multi-day rule?
-4. Does adding IV-surface features improve entry quality beyond VIX + range/gap alone?
-
-Deliverables expected:
-- Working rule-engine script + daily eligibility table
-- IV surface tables + join to Arpan trades
-- At least one trained Exit agent + one Entry agent with evaluation report
-- Short markdown findings doc under `docs/` (e.g. `docs/rl-entry-exit-findings.md`)
+| Schema | `apps/web/lib/db/schema.ts` |
+| Prior RL reward design (reference only) | `docs/rl-reward-shaping.md` |
 
 ---
 
-## 8. Non-Goals (do not expand scope)
+## 7. Non-goals (this pass)
 
-- Live broker auto-trading
-- Full multi-underlier portfolio optimization
-- High-frequency / intrabar RL (we do not have reliable full history of intraday option chains for that yet)
-- Claiming a production edge before out-of-sample and cost-adjusted results are honest
-
----
-
-## 9. Coding conventions
-
-- Prefer TypeScript for anything that already lives in the Next/Drizzle world; Python is fine (and preferred) for pure RL + heavy numerical work.
-- Every research script should be runnable from `apps/web` with clear CLI args and a summary printed to stdout.
-- No look-ahead. No silent drops of NaNs without logging coverage.
-- When you invent a constant (0.8% range, 0.6% gap, premium ceiling), put it in a single config object and log it in the report.
+- Live broker automation
+- RL training loops
+- Hard-coding “buy cheap OTM on expansion + rising VIX” as production policy
+- Claiming edge before cost-adjusted, out-of-sample, and regime-decay checks
 
 ---
 
-**Start with Phase A (decision tree + join to Arpan trades).**  
-That single analysis will tell us whether the rest of the RL stack is even pointed at the right phenomenon.
+## 8. Definition of done (this pass)
+
+You can stop and report when:
+
+1. IV surface (or daily ATM IV + rank + skew + term) is queryable for NIFTY over the study window.  
+2. Rule engine has published OR vs AND and VIX-up vs VIX-down forward-move tables.  
+3. Phase A has regime distributions on Arpan candidate sessions vs base rates.  
+4. A short findings doc states clearly whether the old “long cheap convexity on expansion + rising VIX” story is supported, inverted, or inconclusive.
+
+**Start with IV surface, then rule engine, then Phase A.**  
+Do not start RL.
