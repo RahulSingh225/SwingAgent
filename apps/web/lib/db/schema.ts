@@ -127,6 +127,51 @@ export const sectorSnapshot = pgTable(
   t => [primaryKey({ columns: [t.indexName, t.date] })],
 );
 
+/**
+ * Index closing levels — the benchmark leg for excess returns.
+ *
+ * `sector_snapshot` stores only daily % change; chaining rounded percentages
+ * over a 10-day window accumulates error, so the ledger reads levels here.
+ */
+export const indexPrices = pgTable(
+  'index_prices',
+  {
+    indexName: text('index_name').notNull(),
+    date: date('date').notNull(),
+    close: doublePrecision('close').notNull(),
+    pctChange: real('pct_change'),
+  },
+  t => [primaryKey({ columns: [t.indexName, t.date] })],
+);
+
+/**
+ * Corporate actions — splits, bonuses and consolidations.
+ *
+ * `adjFactor` is the multiplier applied to every bar BEFORE `exDate` so the
+ * series is continuous. A 1:1 bonus doubles the share count and halves the
+ * price, so historical bars are scaled by 0.5.
+ *
+ * Dividends are recorded but never adjusted for: the ledger measures price
+ * return, not total return. Stated so nobody assumes otherwise later.
+ */
+export const corporateActions = pgTable(
+  'corporate_actions',
+  {
+    id: serial('id').primaryKey(),
+    ticker: text('ticker').notNull(),
+    exDate: date('ex_date').notNull(),
+    subject: text('subject').notNull(),
+    /** split | bonus | consolidation | dividend | other */
+    actionType: text('action_type').notNull(),
+    adjFactor: doublePrecision('adj_factor'),
+    raw: jsonb('raw').$type<Record<string, unknown>>(),
+  },
+  t => [
+    index('corp_actions_ticker_ex_idx').on(t.ticker, t.exDate),
+    index('corp_actions_type_idx').on(t.actionType),
+  ],
+);
+
 /** FII/DII daily flows in ₹ Cr (ported fii-dii-data scraper). */
 export const fiiDii = pgTable('fii_dii', {
   date: date('date').primaryKey(),
@@ -196,3 +241,53 @@ export const feedSources = pgTable('feed_sources', {
   pollIntervalMin: integer('poll_interval_min').notNull().default(15),
   lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
 });
+
+// ── Outcome ledger ───────────────────────────────────────
+
+/**
+ * Every NSE corporate announcement, stored verbatim.
+ *
+ * Landed raw and unfiltered on purpose: the archive is only reachable by
+ * scraping, so anything discarded here costs a full re-crawl to recover.
+ * Classification and filtering read from this table, never replace it.
+ *
+ * `announcedAt` is the exchange dissemination time — the earliest moment the
+ * information was public. Entry timing is derived from it, which is what keeps
+ * look-ahead bias out of the ledger.
+ */
+export const announcementsRaw = pgTable(
+  'announcements_raw',
+  {
+    /** NSE's own sequence id — stable across refetches, so it drives dedup. */
+    seqId: text('seq_id').primaryKey(),
+    symbol: text('symbol'),
+    isin: text('isin'),
+    companyName: text('company_name'),
+    /** NSE's own announcement category (their `desc` field) — taxonomy spine. */
+    category: text('category'),
+    /** NSE's industry label. Blank roughly half the time; join `companies` instead. */
+    smIndustry: text('sm_industry'),
+    announcedAt: timestamp('announced_at', { withTimezone: true }).notNull(),
+    /** Headline-length summary (median ~128 chars). Order values live in the PDF. */
+    attachmentText: text('attachment_text'),
+    attachmentFile: text('attachment_file'),
+    raw: jsonb('raw').$type<Record<string, unknown>>().notNull(),
+    ingestedAt: timestamp('ingested_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  t => [
+    index('ann_raw_announced_at_idx').on(t.announcedAt),
+    index('ann_raw_symbol_idx').on(t.symbol),
+    index('ann_raw_category_idx').on(t.category),
+  ],
+);
+
+/** Backfill checkpoints so a killed crawl resumes instead of restarting. */
+export const backfillProgress = pgTable('backfill_progress', {
+  job: text('job').notNull(),
+  // Not `window` — that is a reserved word in Postgres.
+  windowKey: text('window_key').notNull(),
+  status: text('status').notNull(), // done | failed
+  rows: integer('rows').notNull().default(0),
+  note: text('note'),
+  completedAt: timestamp('completed_at', { withTimezone: true }).notNull().defaultNow(),
+}, t => [primaryKey({ columns: [t.job, t.windowKey] })]);
