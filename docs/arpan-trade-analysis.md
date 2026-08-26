@@ -574,3 +574,85 @@ up until it is not.
 and an unbounded left tail, in a sample containing no crash. Sizing it by average
 outcome would be the same error the trader made in reverse.
 
+
+---
+
+# Phase A — what climate was he actually trading in? (2026-08-26)
+
+`scripts/resolve-arpan-fills.py`. Fills resolved to candidate sessions by the only
+constraint that needs no model: **a fill at Rs0.60 can only have happened on a
+session where Low <= 0.60 <= High.** Then `regime_daily` overlaid on those sessions.
+
+830 of 1,440 option rows located in bhavcopy (the rest are BSE/MCX, or expiries
+outside the backfill). Among located rows the buy leg pins to **exactly one session
+in 62 of 72** cleanly-resolved cases — the lookup is sharp.
+
+## Direction inference failed again, for the third time, and the reason is the same
+
+| status | side | n | net |
+|---|---|---|---|
+| resolved | LONG | 5 | −92,766 |
+| resolved | SHORT | 67 | +407,526 |
+| settled | LONG | 11 | −3,820 |
+| settled | SHORT | 16 | +70,854 |
+
+Looks decisive. It is not. The circularity check built into the script:
+
+    winners called SHORT: 65/65  (100%)
+    losers  called LONG :  5/7   (71%)
+
+On a decaying option the higher price of *any* winner sits earlier in the path, so
+ordering the candidate windows separates **profit**, not side. A winning long and a
+winning short are not distinguishable this way. Worse, a winning long needs a price
+*rise*, which makes its path non-monotonic, which pushes it into the `overlapping`
+bucket — so the method cannot even see the cases that would contradict it.
+
+Model-free prices did not fix this, because the confound was never in the model.
+**Only the 27 `settled` rows carry uncontaminated direction** (a zero leg is a
+settlement, not a fill): 16 SHORT, 11 LONG.
+
+Three methods have now failed on this. Direction is not recoverable from this export.
+
+## The regime overlay, which does not depend on direction
+
+Legs weighted 1 each, split across their candidate sessions, so a smeared row cannot
+outvote a pinned one. Reported at four tightness levels:
+
+| pinning | legs | expansion AND | expansion OR | VIX rising |
+|---|---|---|---|---|
+| exactly 1 session | 529 | **1.47x** | 1.14x | **1.00x** |
+| <= 2 sessions | 820 | **1.47x** | 1.14x | 1.04x |
+| <= 4 sessions | 1234 | 1.35x | 1.13x | 1.07x |
+| all (smeared) | 1643 | 1.30x | 1.13x | 1.07x |
+
+The expansion lift **rises as the pinning tightens** — 1.30 -> 1.35 -> 1.47. That is
+the signature of a real effect emerging as measurement noise is stripped out, and it
+is the main reason to believe this rather than the smeared version.
+
+VIX level, tightest tranche (his % / baseline %):
+
+    calm 25/38    low 41/32    normal 23/21    elevated 9/6    high 1/3
+    mean India VIX 14.74 vs baseline 14.12
+
+## Three conclusions, and they split cleanly
+
+**1. He did select expansion days — 1.47x, and AND again beats OR** (1.47 vs 1.14).
+Same ordering found in every other test. The tree's first gate is descriptive of him
+*and* predictive.
+
+**2. He did NOT select on VIX direction. Lift 1.00x.** Dead flat against baseline in
+the tightest tranche. The tree's second gate — "is India VIX rising or above its
+average" — has no basis in his behaviour whatsoever.
+
+**3. He avoided the calmest days** (25% vs 38%) and shifted into low/normal/elevated.
+So "stand down on quiet days" is descriptive of him in the *level* sense, not the
+direction sense.
+
+## The useful part: what he did and what works are different questions
+
+VIX rising predicts materially better forward outcomes — E abs 5d of 2.93 vs 2.27,
+with vega moving the right way (+0.33 vs −1.21). He was not using it.
+
+So the VIX-direction gate should stay in the rule engine, but credited to the
+research rather than to him. And the imitation term in the reward doc would, if it
+worked at all, actively teach an agent to *ignore* a filter that measures as useful.
